@@ -1,0 +1,320 @@
+index.html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ration Shop Manager | Mohammed Shanil</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- Firebase SDKs -->
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;800&display=swap');
+        body { font-family: 'Plus Jakarta Sans', sans-serif; -webkit-tap-highlight-color: transparent; }
+        .glass-card { background: rgba(255, 255, 255, 0.8); backdrop-filter: blur(10px); }
+        .animate-float { animation: float 3s ease-in-out infinite; }
+        @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-900 mb-20 md:mb-0">
+
+    <div id="app">
+        <div class="flex items-center justify-center min-h-screen">
+            <div class="flex flex-col items-center gap-4">
+                <div class="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+                <p class="font-bold text-slate-400">Loading Shanil's App...</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- CONFIGURATION ---
+        const firebaseConfig = JSON.parse(__firebase_config);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'ration-shop-v1';
+        const apiKey = ""; // API Key injected at runtime
+
+        // Initialize Firebase
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
+        const auth = firebase.auth();
+
+        // App State
+        let state = {
+            user: null,
+            activeTab: 'dashboard',
+            transactions: [],
+            shops: [
+                { id: 1, name: 'Shop 1 - Main' },
+                { id: 2, name: 'Shop 2 - Branch' },
+                { id: 3, name: 'Shop 3 - City' },
+                { id: 4, name: 'Shop 4 - Rural' }
+            ],
+            isAnalyzing: false,
+            isSpeaking: false,
+            aiAnalysis: ''
+        };
+
+        // --- AUTH ---
+        async function initAuth() {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await auth.signInWithCustomToken(__initial_auth_token);
+                } else {
+                    await auth.signInAnonymously();
+                }
+            } catch (e) { console.error(e); }
+        }
+
+        auth.onAuthStateChanged(user => {
+            state.user = user;
+            if (user) syncData();
+            render();
+        });
+
+        // --- DATA ---
+        function syncData() {
+            db.collection('artifacts').doc(appId).collection('public').doc('data').collection('transactions')
+                .onSnapshot(snapshot => {
+                    state.transactions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
+                        .sort((a, b) => new Date(b.date) - new Date(a.date));
+                    render();
+                });
+        }
+
+        // --- GEMINI API HELPERS ---
+        async function callGemini(payload, model = "gemini-2.5-flash-preview-09-2025") {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+            let delay = 1000;
+            for (let i = 0; i < 5; i++) {
+                try {
+                    const res = await fetch(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    if (res.ok) return await res.json();
+                } catch (e) {}
+                await new Promise(r => setTimeout(r, delay));
+                delay *= 2;
+            }
+            throw new Error("API Failed");
+        }
+
+        async function getAiInsight() {
+            state.isAnalyzing = true; render();
+            const summary = state.shops.map(s => {
+                const tx = state.transactions.filter(t => t.shopId === s.id);
+                const inc = tx.filter(t => t.type === 'income').reduce((a, b) => a + b.amount, 0);
+                const exp = tx.filter(t => t.type === 'expense').reduce((a, b) => a + b.amount, 0);
+                return `${s.name}: Inc ₹${inc}, Exp ₹${exp}`;
+            }).join('. ');
+
+            try {
+                const data = await callGemini({
+                    contents: [{ parts: [{ text: `Professional advice for 4 ration shops in Kerala. Data: ${summary}. Language: Manglish. Limit: 3 short sentences.` }] }]
+                });
+                state.aiAnalysis = data.candidates[0].content.parts[0].text;
+            } catch (e) { state.aiAnalysis = "AI error. Please try again."; }
+            state.isAnalyzing = false; render();
+        }
+
+        async function playAiVoice() {
+            if (state.isSpeaking) return;
+            state.isSpeaking = true; render();
+            const total = state.transactions.reduce((acc, t) => acc + (t.type === 'income' ? t.amount : -t.amount), 0);
+            
+            try {
+                const data = await callGemini({
+                    contents: [{ parts: [{ text: `Say in Malayalam: Namaskaram Shanil. Innathe motham labham ${total} rupaya aanu. Nalla oru divasam nerunnu.` }] }],
+                    generationConfig: { 
+                        responseModalities: ["AUDIO"], 
+                        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } } } 
+                    }
+                }, "gemini-2.5-flash-preview-tts");
+
+                const audioBlob = b64toBlob(data.candidates[0].content.parts[0].inlineData.data, 'audio/wav');
+                const audio = new Audio(URL.createObjectURL(audioBlob));
+                audio.onended = () => { state.isSpeaking = false; render(); };
+                audio.play();
+            } catch (e) { state.isSpeaking = false; render(); }
+        }
+
+        function b64toBlob(b64Data, contentType) {
+            const byteCharacters = atob(b64Data);
+            const byteArrays = [];
+            for (let offset = 0; offset < byteCharacters.length; offset += 512) {
+                const slice = byteCharacters.slice(offset, offset + 512);
+                const byteNumbers = new Array(slice.length);
+                for (let i = 0; i < slice.length; i++) byteNumbers[i] = slice.charCodeAt(i);
+                byteArrays.push(new Uint8Array(byteNumbers));
+            }
+            return new Blob(byteArrays, {type: contentType});
+        }
+
+        // --- RENDER LOGIC ---
+        function render() {
+            const root = document.getElementById('app');
+            if (!state.user) return;
+
+            const totalInc = state.transactions.filter(t => t.type === 'income').reduce((a, b) => a + b.amount, 0);
+            const totalExp = state.transactions.filter(t => t.type === 'expense').reduce((a, b) => a + b.amount, 0);
+
+            root.innerHTML = `
+                <div class="flex flex-col md:flex-row min-h-screen">
+                    <nav class="fixed bottom-0 w-full bg-white border-t flex justify-around p-4 z-50 md:relative md:w-64 md:flex-col md:h-screen md:justify-start md:border-r">
+                        <div class="hidden md:block p-6 mb-4">
+                            <h1 class="text-xl font-black text-blue-600 tracking-tighter uppercase">Ration Manager</h1>
+                            <p class="text-[10px] font-bold text-slate-400 mt-1 uppercase">Shanil & Co.</p>
+                        </div>
+                        ${['dashboard', 'add', 'history'].map(tab => `
+                            <button onclick="state.activeTab='${tab}'; render();" class="flex flex-col md:flex-row items-center gap-3 p-4 rounded-2xl transition-all ${state.activeTab === tab ? 'text-blue-600 bg-blue-50' : 'text-slate-400 hover:text-slate-600'}">
+                                <i data-lucide="${tab === 'dashboard' ? 'layout-dashboard' : tab === 'add' ? 'plus-circle' : 'history'}" class="w-6 h-6"></i>
+                                <span class="text-[10px] md:text-sm font-black uppercase tracking-widest">${tab}</span>
+                            </button>
+                        `).join('')}
+                    </nav>
+
+                    <main class="flex-1 p-4 md:p-10 max-w-5xl mx-auto w-full overflow-y-auto">
+                        ${state.activeTab === 'dashboard' ? renderDashboard(totalInc, totalExp) : ''}
+                        ${state.activeTab === 'add' ? renderAddForm() : ''}
+                        ${state.activeTab === 'history' ? renderHistory() : ''}
+                    </main>
+                </div>
+            `;
+            lucide.createIcons();
+        }
+
+        function renderDashboard(inc, exp) {
+            return `
+                <div class="space-y-6 animate-in fade-in duration-500">
+                    <div class="bg-indigo-950 rounded-[2.5rem] p-8 text-white relative overflow-hidden shadow-2xl">
+                        <div class="relative z-10">
+                            <div class="flex justify-between items-start mb-6">
+                                <div class="p-3 bg-white/10 rounded-2xl"><i data-lucide="sparkles" class="text-yellow-400"></i></div>
+                                <button onclick="playAiVoice()" class="flex items-center gap-2 bg-white/10 px-4 py-2 rounded-full text-xs font-bold hover:bg-white/20 transition">
+                                    <i data-lucide="${state.isSpeaking ? 'loader-2' : 'volume-2'}" class="${state.isSpeaking ? 'animate-spin' : ''}"></i>
+                                    ${state.isSpeaking ? 'SNEAKING...' : 'AI SUMMARY'}
+                                </button>
+                            </div>
+                            <h2 class="text-2xl font-black mb-2">AI Advisor ✨</h2>
+                            <p class="text-indigo-200 text-sm leading-relaxed italic mb-6">"${state.aiAnalysis || 'Click analyze to get financial tips from Gemini AI.'}"</p>
+                            <button onclick="getAiInsight()" class="w-full bg-white text-indigo-950 py-4 rounded-2xl font-black text-sm uppercase tracking-widest hover:bg-indigo-50 transition">
+                                ${state.isAnalyzing ? 'Analyzing...' : 'Refresh AI Analysis'}
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-2 md:grid-cols-3 gap-4">
+                        <div class="bg-white p-6 rounded-3xl border border-slate-100 shadow-sm">
+                            <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Income</p>
+                            <p class="text-2xl font-black text-green-600">₹${inc.toLocaleString()}</p>
+                        </div>
+                        <div class="bg-white p-6 rounded-3xl border border-slate-100 shadow-sm">
+                            <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Expense</p>
+                            <p class="text-2xl font-black text-red-600">₹${exp.toLocaleString()}</p>
+                        </div>
+                        <div class="bg-blue-600 p-6 rounded-3xl text-white shadow-lg col-span-2 md:col-span-1">
+                            <p class="text-[10px] font-bold text-blue-100 uppercase tracking-widest mb-1">Balance</p>
+                            <p class="text-2xl font-black">₹${(inc - exp).toLocaleString()}</p>
+                        </div>
+                    </div>
+
+                    <h2 class="text-xl font-black text-slate-800 pt-6">Shop Breakdown</h2>
+                    <div class="grid gap-4 md:grid-cols-2">
+                        ${state.shops.map(s => {
+                            const tx = state.transactions.filter(t => t.shopId === s.id);
+                            const si = tx.filter(t => t.type === 'income').reduce((a, b) => a + b.amount, 0);
+                            const se = tx.filter(t => t.type === 'expense').reduce((a, b) => a + b.amount, 0);
+                            const bal = si - se;
+                            return `
+                                <div class="bg-white p-6 rounded-3xl border border-slate-100 hover:shadow-lg transition-all">
+                                    <div class="flex justify-between items-center mb-4"><span class="font-black uppercase text-sm">${s.name}</span></div>
+                                    <div class="flex justify-between items-end">
+                                        <div><p class="text-[10px] font-bold text-slate-400">STATUS</p><p class="font-black ${bal >= 0 ? 'text-green-600' : 'text-red-600'}">₹${bal}</p></div>
+                                        <div class="text-right text-[10px] font-bold text-slate-300">ID: ${s.id}</div>
+                                    </div>
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderAddForm() {
+            return `
+                <div class="max-w-md mx-auto bg-white p-8 rounded-[2.5rem] shadow-2xl border border-slate-50 animate-in slide-in-from-bottom-8">
+                    <h2 class="text-2xl font-black mb-8">New Entry ✨</h2>
+                    <form onsubmit="saveData(event)" class="space-y-6">
+                        <select name="shopId" class="w-full p-5 bg-slate-50 rounded-2xl border-none font-bold text-slate-700 outline-none ring-2 ring-transparent focus:ring-blue-500 transition">
+                            ${state.shops.map(s => `<option value="${s.id}">${s.name}</option>`).join('')}
+                        </select>
+                        <div class="flex gap-2">
+                            <input type="radio" name="type" value="income" id="inc" class="hidden peer/inc" checked>
+                            <label for="inc" class="flex-1 py-4 text-center rounded-2xl bg-slate-100 font-black text-xs uppercase tracking-widest peer-checked/inc:bg-green-500 peer-checked/inc:text-white transition-all">Varavu</label>
+                            <input type="radio" name="type" value="expense" id="exp" class="hidden peer/exp">
+                            <label for="exp" class="flex-1 py-4 text-center rounded-2xl bg-slate-100 font-black text-xs uppercase tracking-widest peer-checked/exp:bg-red-500 peer-checked/exp:text-white transition-all">Chelavu</label>
+                        </div>
+                        <input type="number" name="amount" placeholder="Amount (₹)" required class="w-full p-5 bg-slate-50 rounded-2xl border-none outline-none text-2xl font-black">
+                        <input type="text" name="description" placeholder="Description" required class="w-full p-5 bg-slate-50 rounded-2xl border-none outline-none font-bold">
+                        <button type="submit" class="w-full bg-slate-900 text-white p-6 rounded-[2rem] font-black text-sm uppercase tracking-widest shadow-xl active:scale-95 transition-all">Save Record</button>
+                    </form>
+                </div>
+            `;
+        }
+
+        async function saveData(e) {
+            e.preventDefault();
+            const fd = new FormData(e.target);
+            const data = {
+                shopId: parseInt(fd.get('shopId')),
+                amount: parseFloat(fd.get('amount')),
+                description: fd.get('description'),
+                type: fd.get('type'),
+                date: new Date().toISOString(),
+                userId: state.user.uid
+            };
+            await db.collection('artifacts').doc(appId).collection('public').doc('data').collection('transactions').add(data);
+            state.activeTab = 'history'; render();
+        }
+
+        function renderHistory() {
+            return `
+                <div class="space-y-4">
+                    <div class="flex justify-between items-center mb-6">
+                        <h2 class="text-2xl font-black">History</h2>
+                        <span class="bg-blue-50 text-blue-600 px-4 py-1 rounded-full text-[10px] font-black">${state.transactions.length} RECORDS</span>
+                    </div>
+                    ${state.transactions.map(t => `
+                        <div class="bg-white p-5 rounded-3xl border border-slate-50 flex justify-between items-center group hover:scale-[1.01] transition-all">
+                            <div class="flex items-center gap-4">
+                                <div class="p-3 rounded-2xl ${t.type === 'income' ? 'bg-green-50 text-green-600' : 'bg-red-50 text-red-600'}">
+                                    <i data-lucide="${t.type === 'income' ? 'trending-up' : 'wallet'}" class="w-6 h-6"></i>
+                                </div>
+                                <div>
+                                    <p class="font-black text-slate-800 text-lg">${t.description}</p>
+                                    <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">${state.shops.find(s=>s.id===t.shopId).name} • ${new Date(t.date).toLocaleDateString()}</p>
+                                </div>
+                            </div>
+                            <div class="flex items-center gap-6">
+                                <span class="text-lg font-black ${t.type === 'income' ? 'text-green-600' : 'text-red-600'}">₹${t.amount.toLocaleString()}</span>
+                                <button onclick="deleteTx('${t.id}')" class="text-slate-200 hover:text-red-500 transition-colors"><i data-lucide="trash-2"></i></button>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+        }
+
+        async function deleteTx(id) {
+            await db.collection('artifacts').doc(appId).collection('public').doc('data').collection('transactions').doc(id).delete();
+        }
+
+        initAuth();
+    </script>
+</body>
+</html>
+
